@@ -74,25 +74,65 @@ scraper.update_config({
 # Main content
 st.markdown("---")
 
-# File upload
-uploaded_file = st.file_uploader(
-    "📁 Sube tu archivo CSV con las fuentes",
-    type=['csv'],
-    help="El CSV debe tener columnas: siteURL, web (1 para activado)"
-)
+# Default sites list
+DEFAULT_SITES = [
+    "https://www.ayuntamientoboadilladelmonte.org/boadilla-actualidad?items_per_page=20",
+    "https://www.diariodeboadilla.es/hemeroteca/all",
+    "https://boadilladigital.es/category/boadilla-del-monte/ayuntamiento/",
+    "https://boadilladigital.es/category/boadilla-del-monte/en-boadilla/",
+    "https://boadilladigital.es/category/boadilla-del-monte/fiestas/",
+    "https://www.soloboadilla.es/actualidad/",
+    "https://infoboadilla.com/noticias-busqueda/todos/0/0/0/0/1/",
+    "https://www.soydemadrid.com/noticias-boadilla/noticias-96.aspx",
+    "https://madrid365.es/municipios/boadilla-del-monte/",
+    "https://ayuntamientoboadilladelmonte.org/boadilla-actualidad/agenda?query=&tema=All&items_per_page=20",
+]
 
+# File upload (optional)
+st.subheader("📁 Fuentes de Noticias")
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    uploaded_file = st.file_uploader(
+        "Sube tu archivo CSV (opcional)",
+        type=['csv'],
+        help="El CSV debe tener columnas: siteURL, web (1 para activado)"
+    )
+
+with col2:
+    use_default = st.checkbox(
+        "Usar sitios por defecto",
+        value=True if not uploaded_file else False,
+        help="Usa la lista de sitios de Boadilla del Monte"
+    )
+
+# Show active source
 if uploaded_file:
-    st.success(f"✅ Archivo cargado: {uploaded_file.name}")
-    
+    st.info(f"📄 Usando CSV: **{uploaded_file.name}**")
+elif use_default:
+    st.info(f"🌐 Usando **{len(DEFAULT_SITES)} sitios por defecto** de Boadilla del Monte")
+    with st.expander("Ver sitios por defecto"):
+        for i, site in enumerate(DEFAULT_SITES, 1):
+            st.text(f"{i}. {site}")
+else:
+    st.warning("⚠️ Selecciona una fuente de datos (CSV o sitios por defecto)")
+
+# Search button
+if uploaded_file or use_default:
     if st.button("🔍 Buscar Noticias", type="primary", use_container_width=True):
         with st.spinner("🔄 Procesando sitios..."):
             # Progress tracking
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Load sites from uploaded file
-            sites = scraper.load_sites_from_file(uploaded_file)
-            status_text.text(f"📍 {len(sites)} sitios cargados")
+            # Load sites from uploaded file or use defaults
+            if uploaded_file:
+                sites = scraper.load_sites_from_file(uploaded_file)
+                status_text.text(f"📍 {len(sites)} sitios cargados desde CSV")
+            else:
+                sites = DEFAULT_SITES
+                status_text.text(f"📍 {len(sites)} sitios por defecto cargados")
+            
             progress_bar.progress(10)
             
             if not sites:
