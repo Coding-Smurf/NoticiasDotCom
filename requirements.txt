@@ -1,3 +1,9 @@
 streamlit
 pandas
 numpy
+streamlit
+openai
+beautifulsoup4
+requests
+python-dateutil
+lxml
