@@ -1,7 +1,12 @@
 import streamlit as st
 import json
-from datetime import datetime
-from utils.news_scraper import NewsScraper
+from datetime import datetime, timedelta
+
+from services.scraper_service import NewsScraperService
+from services.deduplication_service import DeduplicationService
+from services.article_content_extractor import ArticleContentExtractor
+from services.article_synthesis_service import ArticleSynthesisService
+from config.sources import NEWS_SOURCES
 
 st.set_page_config(
     page_title="Dashboard - Monitor de Noticias",
@@ -9,220 +14,181 @@ st.set_page_config(
     layout="wide",
 )
 
-# Initialize scraper
+st.title("📊 Monitor de Noticias")
+
 if 'scraper' not in st.session_state:
-    api_key = st.secrets.get("OPENAI_API_KEY", "")
-    st.session_state.scraper = NewsScraper(api_key)
+    st.session_state.scraper = NewsScraperService(timeout=15)
 
 scraper = st.session_state.scraper
 
-st.title("📊 Dashboard de Noticias")
-
-# Sidebar configuration
+# Sidebar config
 with st.sidebar:
     st.header("⚙️ Configuración")
     
-    recent_days = st.slider(
+    days_threshold = st.slider(
         "Días recientes",
         min_value=1,
         max_value=90,
-        value=30,
-        help="Filtrar noticias de los últimos N días"
+        value=7,
+        step=1,
+        help="Filtrar artículos de los últimos N días"
     )
+
+# Main action button
+if st.button("🔍 Escanear y Agrupar Noticias", use_container_width=True, type="primary"):
+    # Obtener API key de secrets
+    try:
+        openai_api_key = st.secrets["OPENAI_API_KEY"]
+    except KeyError:
+        st.error("❌ No se encontró OPENAI_API_KEY en .streamlit/secrets.toml")
+        st.info("Crea el archivo `.streamlit/secrets.toml` con:\n```\nOPENAI_API_KEY = \"sk-your-key-here\"\n```")
+        st.stop()
     
-    max_workers_sites = st.slider(
-        "Workers (Sitios)",
-        min_value=1,
-        max_value=10,
-        value=5,
-        help="Sitios procesados en paralelo"
-    )
-    
-    max_workers_articles = st.slider(
-        "Workers (Artículos)",
-        min_value=1,
-        max_value=20,
-        value=10,
-        help="Artículos procesados en paralelo"
-    )
-    
-    max_workers_summaries = st.slider(
-        "Workers (Resúmenes)",
-        min_value=1,
-        max_value=10,
-        value=5,
-        help="Resúmenes generados en paralelo"
-    )
-    
-    request_delay = st.number_input(
-        "Delay entre requests (seg)",
-        min_value=0.0,
-        max_value=5.0,
-        value=1.0,
-        step=0.5
-    )
-
-# Update config
-scraper.update_config({
-    "recent_days": recent_days,
-    "max_workers_sites": max_workers_sites,
-    "max_workers_articles": max_workers_articles,
-    "max_workers_summaries": max_workers_summaries,
-    "request_delay": request_delay,
-})
-
-# Main content
-st.markdown("---")
-
-# Default sites list
-DEFAULT_SITES = [
-    "https://www.ayuntamientoboadilladelmonte.org/boadilla-actualidad?items_per_page=20",
-    "https://www.diariodeboadilla.es/hemeroteca/all",
-    "https://boadilladigital.es/category/boadilla-del-monte/ayuntamiento/",
-    "https://boadilladigital.es/category/boadilla-del-monte/en-boadilla/",
-    "https://boadilladigital.es/category/boadilla-del-monte/fiestas/",
-    "https://www.soloboadilla.es/actualidad/",
-    "https://infoboadilla.com/noticias-busqueda/todos/0/0/0/0/1/",
-    "https://www.soydemadrid.com/noticias-boadilla/noticias-96.aspx",
-    "https://madrid365.es/municipios/boadilla-del-monte/",
-    "https://ayuntamientoboadilladelmonte.org/boadilla-actualidad/agenda?query=&tema=All&items_per_page=20",
-]
-
-# File upload (optional)
-st.subheader("📁 Fuentes de Noticias")
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    uploaded_file = st.file_uploader(
-        "Sube tu archivo CSV (opcional)",
-        type=['csv'],
-        help="El CSV debe tener columnas: siteURL, web (1 para activado)"
-    )
-
-with col2:
-    use_default = st.checkbox(
-        "Usar sitios por defecto",
-        value=True if not uploaded_file else False,
-        help="Usa la lista de sitios de Boadilla del Monte"
-    )
-
-# Show active source
-if uploaded_file:
-    st.info(f"📄 Usando CSV: **{uploaded_file.name}**")
-elif use_default:
-    st.info(f"🌐 Usando **{len(DEFAULT_SITES)} sitios por defecto** de Boadilla del Monte")
-    with st.expander("Ver sitios por defecto"):
-        for i, site in enumerate(DEFAULT_SITES, 1):
-            st.text(f"{i}. {site}")
-else:
-    st.warning("⚠️ Selecciona una fuente de datos (CSV o sitios por defecto)")
-
-# Search button
-if uploaded_file or use_default:
-    if st.button("🔍 Buscar Noticias", type="primary", use_container_width=True):
-        with st.spinner("🔄 Procesando sitios..."):
-            # Progress tracking
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+    # Step 1: Extract URLs
+    with st.spinner("📡 Extrayendo URLs de noticias..."):
+        all_articles = scraper.scrape_multiple(NEWS_SOURCES)
+        
+        if not all_articles:
+            st.error("No se encontraron artículos")
+            st.stop()
+        
+        # Filter by date
+        cutoff_date = datetime.now() - timedelta(days=days_threshold)
+        filtered_articles = []
+        no_date_count = 0
+        old_date_count = 0
+        
+        for article in all_articles:
+            if not article.get('date'):
+                no_date_count += 1
+                continue
             
-            # Load sites from uploaded file or use defaults
-            if uploaded_file:
-                sites = scraper.load_sites_from_file(uploaded_file)
-                status_text.text(f"📍 {len(sites)} sitios cargados desde CSV")
-            else:
-                sites = DEFAULT_SITES
-                status_text.text(f"📍 {len(sites)} sitios por defecto cargados")
-            
-            progress_bar.progress(10)
-            
-            if not sites:
-                st.error("❌ No se encontraron sitios válidos en el CSV")
-            else:
-                # Process sites
-                status_text.text("🌐 Extrayendo noticias...")
-                all_news = scraper.process_all_sites(sites)
-                progress_bar.progress(50)
-                
-                if not all_news:
-                    st.warning("⚠️ No se encontraron noticias recientes")
+            try:
+                article_date = datetime.fromisoformat(article['date'].replace('Z', '+00:00'))
+                if article_date.replace(tzinfo=None) >= cutoff_date:
+                    filtered_articles.append(article)
                 else:
-                    # Group and summarize
-                    status_text.text("🔗 Agrupando duplicados...")
-                    groups = scraper.group_duplicates(all_news)
-                    progress_bar.progress(70)
-                    
-                    status_text.text("📝 Generando resúmenes...")
-                    all_news = scraper.summarize_groups(groups, all_news)
-                    progress_bar.progress(100)
-                    
-                    # Store results
-                    st.session_state.results = all_news
-                    st.session_state.groups = groups
-                    
-                    status_text.text("✅ Proceso completado")
-                    st.balloons()
-
-# Display results
-if 'results' in st.session_state and st.session_state.results:
-    st.markdown("---")
-    st.header("📊 Resultados")
+                    old_date_count += 1
+            except (ValueError, AttributeError):
+                no_date_count += 1
+        
+        st.session_state.articles_data = filtered_articles
+        
+        st.success(f"✅ {len(filtered_articles)} artículos extraídos")
+        if no_date_count > 0 or old_date_count > 0:
+            st.info(f"ℹ️ Excluidos: {no_date_count} sin fecha, {old_date_count} antiguos")
     
-    results = st.session_state.results
-    groups = st.session_state.groups
+    # Step 2: Extract content
+    with st.spinner("📄 Extrayendo contenido de artículos..."):
+        extractor = ArticleContentExtractor()
+        urls = [a['url'] for a in st.session_state.articles_data]
+        
+        progress_bar = st.progress(0)
+        url_contents = {}
+        
+        for i, url in enumerate(urls):
+            content = extractor.extract_content(url)
+            if content:
+                url_contents[url] = content
+            progress_bar.progress((i + 1) / len(urls))
+        
+        progress_bar.empty()
+        
+        st.session_state.url_contents = url_contents
+        
+        st.success(f"✅ Contenido extraído de {len(url_contents)}/{len(urls)} artículos")
     
-    # Stats
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("📰 Total Artículos", len(results))
-    with col2:
-        unique_sources = len(set(article.get('source', '') for article in results))
-        st.metric("🌐 Fuentes", unique_sources)
-    with col3:
-        st.metric("📑 Grupos", len(groups))
-    with col4:
-        duplicates = sum(1 for g in groups if len(g) > 1)
-        st.metric("🔗 Duplicados", duplicates)
-    
-    # Display groups
-    st.markdown("### 📋 Grupos de Noticias")
-    
-    for group_idx, group_indices in enumerate(groups, 1):
-        with st.expander(
-            f"**Grupo {group_idx}** - {len(group_indices)} artículo(s)",
-            expanded=(len(group_indices) > 1)
-        ):
-            # Summary
-            first_article = results[group_indices[0]]
-            if first_article.get('summary'):
-                st.info(f"**Resumen:** {first_article['summary']}")
+    # Step 3: Group similar articles
+    with st.spinner("🔗 Agrupando artículos similares..."):
+        try:
+            deduplicator = DeduplicationService(
+                similarity_threshold=0.75,
+                bm25_weight=0.30,
+                openai_api_key=openai_api_key
+            )
+            groups = deduplicator.group_similar_articles(url_contents)
             
-            # Articles
-            for i in group_indices:
-                article = results[i]
-                
-                st.markdown(f"""
-                **{article['title']}**
-                - 🔗 [{article['url']}]({article['url']})
-                - 📍 Fuente: `{article['source']}`
-                - 📅 Fecha: {article.get('date', 'N/A')}
-                """)
-                
-                if i < group_indices[-1]:
-                    st.markdown("---")
+            st.session_state.groups = groups
+            st.session_state.deduplicator_instance = deduplicator
+            
+            stats = deduplicator.get_statistics(groups)
+            
+            st.success(f"✅ {stats['duplicated_groups']} grupos con duplicados encontrados")
+            
+        except Exception as e:
+            st.error(f"Error al agrupar: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+            st.stop()
     
-    # Download button
+    # Step 4: Synthesize articles
+    with st.spinner("✨ Sintetizando artículos con GPT-4o-mini..."):
+        try:
+            synthesizer = ArticleSynthesisService(openai_api_key)
+            
+            progress_bar = st.progress(0)
+            
+            def update_progress(progress):
+                progress_bar.progress(progress)
+            
+            synthesized = synthesizer.synthesize_all_groups(
+                groups, 
+                url_contents,
+                progress_callback=update_progress
+            )
+            
+            progress_bar.empty()
+            
+            st.session_state.synthesized_articles = synthesized
+            
+            st.success(f"✅ {len(synthesized)} artículos sintetizados")
+            
+        except Exception as e:
+            st.error(f"Error al sintetizar: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+# Display synthesized articles if available
+if 'synthesized_articles' in st.session_state:
+    st.markdown("---")
+    st.markdown("### 📰 Noticias Sintetizadas")
+    
+    articles = st.session_state.synthesized_articles
+    
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Artículos", len(articles))
+    with col2:
+        multi_source = sum(1 for a in articles if a.get('group_size', 1) > 1)
+        st.metric("Multi-fuente", multi_source)
+    with col3:
+        single_source = sum(1 for a in articles if a.get('group_size', 1) == 1)
+        st.metric("Fuente única", single_source)
+    
     st.markdown("---")
     
-    json_str = json.dumps(results, ensure_ascii=False, indent=2)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    st.download_button(
-        label="💾 Descargar JSON",
-        data=json_str,
-        file_name=f"noticias_{timestamp}.json",
-        mime="application/json",
-        use_container_width=True
-    )
-
-else:
-    st.info("👆 Sube un archivo CSV y haz clic en 'Buscar Noticias' para comenzar")
+    # Display articles as clickable list
+    for i, article in enumerate(articles):
+        title = article.get('title', 'Sin título')
+        summary = article.get('summary', '')
+        group_size = article.get('group_size', 1)
+        
+        # Icon based on group size
+        icon = "📰" if group_size == 1 else f"📊 ({group_size} fuentes)"
+        
+        # Create expandable article
+        with st.expander(f"{icon} {title}", expanded=False):
+            if summary and summary != title:
+                st.markdown(f"**{summary}**")
+                st.markdown("---")
+            
+            # Display article content with markdown
+            st.markdown(article.get('content', ''))
+            
+            # Show sources if multiple
+            if group_size > 1:
+                st.markdown("---")
+                st.markdown("**Fuentes:**")
+                for url in article.get('source_urls', []):
+                    st.markdown(f"- {url}")
